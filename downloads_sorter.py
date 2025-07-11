@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 class DownloadsSorter:
     """Class to handle automatic sorting of files in Downloads folder."""
     
-    def __init__(self, downloads_path: str = None):
+    def __init__(self, downloads_path: str | None = None):
         """
         Initialize the DownloadsSorter.
         
@@ -70,6 +70,18 @@ class DownloadsSorter:
             if not category_path.exists():
                 category_path.mkdir(exist_ok=True)
                 logger.info(f"Created directory: {category_path}")
+        
+        # Create Rogue_Folders directory
+        rogue_path = self.downloads_path / "Rogue_Folders"
+        if not rogue_path.exists():
+            rogue_path.mkdir(exist_ok=True)
+            logger.info(f"Created directory: {rogue_path}")
+        
+        # Create Others directory
+        others_path = self.downloads_path / "Others"
+        if not others_path.exists():
+            others_path.mkdir(exist_ok=True)
+            logger.info(f"Created directory: {others_path}")
     
     def _get_file_category(self, file_path: Path) -> str:
         """
@@ -102,8 +114,23 @@ class DownloadsSorter:
         """
         try:
             if category == "Other":
-                # Don't move files that don't match any category
-                logger.info(f"Keeping {file_path.name} in Downloads (no category match)")
+                # Move files that don't match any category to Others folder
+                category_path = self.downloads_path / "Others"
+                destination = category_path / file_path.name
+                
+                # Handle filename conflicts
+                counter = 1
+                original_name = file_path.stem
+                original_ext = file_path.suffix
+                
+                while destination.exists():
+                    new_name = f"{original_name}_{counter}{original_ext}"
+                    destination = category_path / new_name
+                    counter += 1
+                
+                # Move the file
+                shutil.move(str(file_path), str(destination))
+                logger.info(f"Moved {file_path.name} to Others/")
                 return True
             
             category_path = self.downloads_path / category
@@ -128,25 +155,89 @@ class DownloadsSorter:
             logger.error(f"Error moving {file_path.name}: {e}")
             return False
     
-    def _scan_and_sort_existing_files(self):
-        """Scan Downloads folder and sort any existing files."""
-        logger.info("Scanning for existing files to sort...")
+    def _move_folder_to_rogue(self, folder_path: Path) -> bool:
+        """
+        Move a folder to the Rogue_Folders directory.
         
-        for file_path in self.downloads_path.iterdir():
-            if file_path.is_file():
-                filename = file_path.name
+        Args:
+            folder_path: Path to the folder to move
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            rogue_path = self.downloads_path / "Rogue_Folders"
+            destination = rogue_path / folder_path.name
+            
+            # Handle folder name conflicts
+            counter = 1
+            original_name = folder_path.name
+            
+            while destination.exists():
+                new_name = f"{original_name}_{counter}"
+                destination = rogue_path / new_name
+                counter += 1
+            
+            # Move the folder
+            shutil.move(str(folder_path), str(destination))
+            logger.info(f"Moved folder {folder_path.name} to Rogue_Folders/")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error moving folder {folder_path.name}: {e}")
+            return False
+    
+    def _cleanup_redundant_zips(self):
+        """
+        Check Zip_Files folder for zip files that have corresponding extracted folders
+        and delete the zip files if the folders exist.
+        """
+        zip_folder = self.downloads_path / "Zip_Files"
+        if not zip_folder.exists():
+            return
+        
+        try:
+            for item in zip_folder.iterdir():
+                if item.is_file() and item.suffix.lower() in {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".lzma", ".cab", ".iso"}:
+                    # Get the name without extension
+                    zip_name_without_ext = item.stem
+                    
+                    # Check if there's a folder with the same name
+                    corresponding_folder = zip_folder / zip_name_without_ext
+                    if corresponding_folder.exists() and corresponding_folder.is_dir():
+                        # Delete the zip file since we have the extracted folder
+                        item.unlink()
+                        logger.info(f"Deleted redundant zip file: {item.name} (folder exists)")
+                        
+        except Exception as e:
+            logger.error(f"Error during zip cleanup: {e}")
+    
+    def _scan_and_sort_existing_files(self):
+        """Scan Downloads folder and sort any existing files and folders."""
+        logger.info("Scanning for existing files and folders to sort...")
+        
+        for item_path in self.downloads_path.iterdir():
+            if item_path.is_file():
+                filename = item_path.name
                 if filename not in self.existing_files:
-                    category = self._get_file_category(file_path)
+                    category = self._get_file_category(item_path)
                     if category != "Other":
-                        self._move_file(file_path, category)
+                        self._move_file(item_path, category)
                     self.existing_files.add(filename)
+            elif item_path.is_dir():
+                # Handle folders - move non-category folders to Rogue_Folders
+                folder_name = item_path.name
+                # List of folders to ignore (leave in base directory)
+                ignored_folders = {"Rogue_Folders", "Others", "gcode drop"}
+                if folder_name not in self.categories.keys() and folder_name not in ignored_folders:
+                    self._move_folder_to_rogue(item_path)
     
     def _get_current_files(self) -> Set[str]:
         """Get set of current filenames in Downloads folder."""
         return {f.name for f in self.downloads_path.iterdir() if f.is_file()}
     
     def _process_new_files(self, current_files: Set[str]):
-        """Process any new files that have been added."""
+        """Process any new files and folders that have been added."""
         new_files = current_files - self.existing_files
         
         for filename in new_files:
@@ -155,6 +246,16 @@ class DownloadsSorter:
                 category = self._get_file_category(file_path)
                 self._move_file(file_path, category)
                 self.existing_files.add(filename)
+            elif file_path.is_dir():
+                # Handle new folders - move non-category folders to Rogue_Folders
+                folder_name = file_path.name
+                # List of folders to ignore (leave in base directory)
+                ignored_folders = {"Rogue_Folders", "Others", "gcode drop"}
+                if folder_name not in self.categories.keys() and folder_name not in ignored_folders:
+                    self._move_folder_to_rogue(file_path)
+        
+        # Check for redundant zip files after processing new items
+        self._cleanup_redundant_zips()
     
     def start_monitoring(self, scan_interval: int = 5):
         """
@@ -201,4 +302,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Program stopped by user (Ctrl+C)")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ An unexpected error occurred: {e}")
+        
